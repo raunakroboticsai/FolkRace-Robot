@@ -1,0 +1,425 @@
+// ================== Pin Configuration ==================
+const int irSensor = 10;
+
+#define AIN1 2
+#define AIN2 4
+#define PWMA 5
+#define BIN1 7
+#define BIN2 8
+#define PWMB 6
+#define STBY 9
+#define FAN 3
+#define START_BTN 9
+#define CAL_BTN 13
+
+#define FLAME_A0 A1
+#define FLAME_A1 A2
+#define FLAME_A2 A4
+#define FLAME_A3 A5
+#define FLAME_A4 A6
+
+#define LINE_SENSOR_1  A0
+#define LINE_SENSOR_2  A3
+#define LINE_SENSOR_3  A7
+
+// ---- Front Ultrasonic for obstacle ----
+#define TRIG_PIN 12
+#define ECHO_PIN 11
+
+// Obstacle ki distance jitni cm se kam ho tabhi "obstacle" maana jaye
+#define OBSTACLE_DISTANCE_CM 10
+
+// ================== Function Prototypes ==================
+void botForward(int speed = 200);
+void botStop();
+void botreverse();
+void botRightTurn();
+void botLeftTurn();
+void motor1run(int motorSpeed);
+void motor2run(int motorSpeed);
+void calibrateLine();
+void readLine();
+void readFlame();
+long  readUltrasonicCM();
+void readObs();
+void approachFlame();
+void alignFlame(int tolerance, int maxSpeed, unsigned long timeoutMs);
+bool flameCentered();
+void printDebug();
+
+// ================== Global Variables ==================
+int lineSensors[3] = {LINE_SENSOR_1, LINE_SENSOR_2, LINE_SENSOR_3};
+int flameSensors[5] = {FLAME_A0, FLAME_A1, FLAME_A2, FLAME_A3, FLAME_A4};
+
+int sensorValue[3], threshold[3], minValues[3], maxValues[3];
+int Flame_sensorValue[5];
+bool flameDetected = 0;
+bool obsDetected = 0;
+bool lineDetected = 0;
+int steering = 0;
+long obsDistanceCM = 999;
+
+// ---- CHANGE 1: Flame Locked flag ----
+// Batata hai ki robot ne middle flame sensor (A2 / flameSensors[2]) ko
+// flame ke saamne accurately align kar diya hai ya nahi.
+bool flameLocked = false;
+
+// alternate turn direction har baar obstacle mile to left/right badalte rahenge
+bool alternateTurn = false;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT); pinMode(PWMA, OUTPUT);
+  pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT); pinMode(PWMB, OUTPUT);
+  pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
+
+  pinMode(START_BTN, INPUT_PULLUP);
+  pinMode(CAL_BTN, OUTPUT); digitalWrite(CAL_BTN, HIGH);
+
+  pinMode(irSensor, OUTPUT); digitalWrite(irSensor, LOW);
+  pinMode(FAN, OUTPUT); digitalWrite(FAN, LOW);
+
+  // Ultrasonic pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+}
+
+void loop() {
+  while (digitalRead(CAL_BTN)) {}
+  delay(1000);
+  calibrateLine();
+
+  while (digitalRead(START_BTN)) {}
+  delay(1000);
+
+  while (1) {
+    readLine();
+    readFlame();
+    readObs();   // ultrasonic se obstacle check
+
+    printDebug();   // Serial Monitor pe sab values dekhne ke liye
+
+    // ---------- CASE 1: Border/Line detected, flame NAHI ----------
+    if (lineDetected && !flameDetected) {
+      flameLocked = false;   // flame nahi hai, lock reset
+
+      botreverse(); delay(400);
+
+      if (sensorValue[2] > threshold[2]) {
+        botRightTurn(); delay(600);
+      } else if (sensorValue[0] > threshold[0]) {
+        botLeftTurn(); delay(600);
+      } else {
+        botreverse(); delay(400);
+        botRightTurn(); delay(600);
+      }
+    }
+
+    // ---------- CASE 2: Flame + Line dono detect -> final align + extinguish ----------
+    // ---- CHANGE 4: flameLocked/flameCentered check add kiya ----
+    else if (flameDetected && lineDetected) {
+
+      if (!flameLocked) {
+        alignFlame(5, 40, 1500);   // pehle A2 ko flame ke saamne align karo
+      }
+
+      readFlame();                 // alignment ke baad dubara fresh reading lo
+
+      if (flameCentered()) {
+        flameLocked = true;
+
+        botStop();
+        digitalWrite(FAN, HIGH);
+        delay(5000);
+        digitalWrite(FAN, LOW);
+
+        botForward(); delay(200);
+        botreverse(); delay(600);
+        botRightTurn(); delay(600);
+
+        flameLocked = false;   // extinguish ho gaya, agle flame ke liye reset
+      }
+      // agar flameCentered() false hai to agle loop iteration me
+      // dubara alignFlame() try hoga (flameLocked abhi bhi false rahega)
+    }
+
+    // ---------- CASE 3: Obstacle hai LEKIN flame bhi detect ho rahi ----------
+    // Matlab ye candle wala box/platform hai, real obstacle nahi -> ignore karo
+    // aur seedha flame approach karo
+    else if (obsDetected && flameDetected) {
+      approachFlame();
+    }
+
+    // ---------- CASE 4: Sirf flame detect (line/obstacle nahi) -> continuous approach ----------
+    // Dur se flame detect hote hi turn karke middle sensor align karta jayega
+    // aur saath saath forward bhi badhta rahega, jab tak line (border) na mil jaye
+    else if (flameDetected && !lineDetected && !obsDetected) {
+      approachFlame();
+    }
+
+    // ---------- CASE 5: Real obstacle (wall/surface) hai, flame nahi ----------
+    else if (obsDetected && !flameDetected) {
+      flameLocked = false;   // flame nahi hai, lock reset
+
+      botStop();
+      botreverse(); delay(400);
+
+      // Har baar alternate side turn taaki same obstacle pe baar baar
+      // ek hi taraf na ghume (stuck hone se bachne ke liye)
+      if (alternateTurn) {
+        botRightTurn(); delay(600);
+      } else {
+        botLeftTurn(); delay(600);
+      }
+      alternateTurn = !alternateTurn;
+
+      botForward(); delay(800);
+    }
+
+    // ---------- CASE 6: Default search movement ----------
+    else {
+      flameLocked = false;   // flame nahi hai, lock reset
+      botForward();
+    }
+
+    delay(100);
+  }
+}
+
+// ================== Line Calibration ==================
+void calibrateLine() {
+  for (int i = 0; i < 3; i++) {
+    minValues[i] = analogRead(lineSensors[i]);
+    maxValues[i] = analogRead(lineSensors[i]);
+  }
+
+  for (int i = 0; i < 10000; i++) {
+    motor1run(150); motor2run(-150);
+    for (int j = 0; j < 3; j++) {
+      int val = analogRead(lineSensors[j]);
+      if (val < minValues[j]) minValues[j] = val;
+      if (val > maxValues[j]) maxValues[j] = val;
+    }
+  }
+
+  for (int i = 0; i < 3; i++) {
+    threshold[i] = (minValues[i] + maxValues[i]) / 2;
+    Serial.print(threshold[i]); Serial.print(" ");
+  }
+  Serial.println();
+
+  motor1run(0); motor2run(0);
+}
+
+// ================== Sensor Readings ==================
+void readLine() {
+  lineDetected = 0;
+  for (int i = 0; i < 3; i++) {
+    int val = analogRead(lineSensors[i]);
+    sensorValue[i] = val;
+    if (val > threshold[i]) {
+      lineDetected = 1;
+    }
+  }
+}
+
+void readFlame() {
+  flameDetected = 0;
+  int flameCount = 0;
+  digitalWrite(irSensor, LOW);
+  delay(5);
+  for (int j = 0; j < 3; j++) {
+    for (int i = 0; i < 5; i++) {
+      Flame_sensorValue[i] = analogRead(flameSensors[i]);
+      if (Flame_sensorValue[i] > 100) {
+        flameCount++;
+      }
+    }
+  }
+  if (flameCount > 2) flameDetected = 1;
+}
+
+// ---- Ultrasonic distance measurement (cm) ----
+long readUltrasonicCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // timeout 20000us ~ approx 3.4m max range, taaki loop atke na
+  long duration = pulseIn(ECHO_PIN, HIGH, 20000);
+
+  if (duration == 0) {
+    // koi echo nahi mila -> maan lo koi obstacle nahi (bahut door / free path)
+    return 999;
+  }
+
+  long distanceCM = duration * 0.0343 / 2;
+  return distanceCM;
+}
+
+// ---- Obstacle detection using ultrasonic ----
+void readObs() {
+  obsDistanceCM = readUltrasonicCM();
+  obsDetected = (obsDistanceCM > 0 && obsDistanceCM < OBSTACLE_DISTANCE_CM);
+}
+
+// ================== Serial Debug Print ==================
+// Serial Monitor (baud 9600) pe line, flame aur obstacle ki
+// sabhi values ek line me dikhata hai, taaki tune/debug karna aasan ho.
+void printDebug() {
+  // ---- Line values ----
+  Serial.print("LINE[");
+  Serial.print(sensorValue[0]); Serial.print(",");
+  Serial.print(sensorValue[1]); Serial.print(",");
+  Serial.print(sensorValue[2]);
+  Serial.print("] Det=");
+  Serial.print(lineDetected);
+
+  // ---- Flame values ----
+  Serial.print("  FLAME[");
+  Serial.print(Flame_sensorValue[0]); Serial.print(",");
+  Serial.print(Flame_sensorValue[1]); Serial.print(",");
+  Serial.print(Flame_sensorValue[2]); Serial.print(",");
+  Serial.print(Flame_sensorValue[3]); Serial.print(",");
+  Serial.print(Flame_sensorValue[4]);
+  Serial.print("] Det=");
+  Serial.print(flameDetected);
+
+  // ---- Obstacle (ultrasonic) ----
+  Serial.print("  OBS_CM=");
+  Serial.print(obsDistanceCM);
+  Serial.print(" Det=");
+  Serial.print(obsDetected);
+
+  // ---- Flame Lock status ----
+  Serial.print("  LOCK=");
+  Serial.println(flameLocked);
+}
+
+// ================== Flame Centering ==================
+
+// ---- Dur se flame approach: turn + forward EK SAATH (curve chalte hue align hota hai) ----
+// Ye har loop iteration me ek baar call hota hai, isliye blocking loop nahi hai -
+// robot smoothly turn karte karte flame ki taraf badhta rahega jab tak line na mile.
+void approachFlame() {
+  int left  = Flame_sensorValue[0] + Flame_sensorValue[1];   // left side flame sensors
+  int right = Flame_sensorValue[3] + Flame_sensorValue[4];   // right side flame sensors
+  int diff  = left - right;
+
+  // diff > 0 => flame left taraf hai -> left wheel slow, right wheel fast (left turn)
+  int turnCorrection = constrain(diff / 4, -80, 80);
+
+  // Middle sensor (flameSensors[2]) ki intensity se andaza lagao flame kitni paas hai,
+  // paas jaane pe automatically speed kam karo (smooth approach ke liye)
+  int intensity  = Flame_sensorValue[2];
+  int baseSpeed  = map(constrain(intensity, 100, 700), 100, 700, 160, 70);
+
+  int leftSpeed  = constrain(baseSpeed - turnCorrection, -255, 255);
+  int rightSpeed = constrain(baseSpeed + turnCorrection, -255, 255);
+
+  motor1run(leftSpeed);
+  motor2run(rightSpeed);
+
+  // ---- CHANGE 3: update flameLocked status har approach cycle me ----
+  if (flameCentered())
+    flameLocked = true;
+  else
+    flameLocked = false;
+}
+
+// ---- CHANGE 5: Precise final alignment ----
+// Ab sirf timeout tak turn nahi karta - balki A2 (middle sensor) ke
+// sabse strong hone tak (flameCentered() true hone tak) ya timeout tak try karta hai.
+// Har iteration me fresh sensor values read karke check karta hai.
+void alignFlame(int tolerance, int maxSpeed, unsigned long timeoutMs) {
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < timeoutMs) {
+
+    // fresh flame readings har baar lo (sirf steering ke liye nahi,
+    // flameCentered() check ke liye bhi zaroori hai)
+    for (int i = 0; i < 5; i++) {
+      Flame_sensorValue[i] = analogRead(flameSensors[i]);
+    }
+
+    // ---- CHANGE 2: A2 sabse strong hai ya nahi, ye check pehle karo ----
+    if (flameCentered()) {
+      flameLocked = true;
+      break;   // A2 center me aa gaya, ab aur turn karne ki zaroorat nahi
+    }
+
+    int left  = Flame_sensorValue[0] + Flame_sensorValue[1];
+    int right = Flame_sensorValue[3] + Flame_sensorValue[4];
+    steering  = left - right;
+
+    // agar steering bhi tolerance ke andar hai lekin flameCentered() false hai,
+    // to bhi thoda aur fine-turn karne do (isliye yahan break nahi karte)
+
+    int turnSpeed = constrain(steering / 3, -maxSpeed, maxSpeed);
+
+    // agar steering bahut chhota hai (near zero) to bhi ek chhoti si nudge do
+    // taaki A2 dobara sabse strong ban sake
+    if (abs(turnSpeed) < 15) {
+      turnSpeed = (steering >= 0) ? 15 : -15;
+    }
+
+    motor1run(-turnSpeed);
+    motor2run(turnSpeed);
+
+    delay(30);   // chhoti step-wise turn, taaki overshoot na ho
+  }
+
+  motor1run(0);
+  motor2run(0);
+}
+
+// ---- CHANGE 2: Verify ki middle flame sensor (A2 / flameSensors[2]) ----
+// sabse strong reading de raha hai ya nahi -> flame exactly center/saamne hai.
+bool flameCentered() {
+  return (
+    Flame_sensorValue[2] > Flame_sensorValue[1] + 50 &&
+    Flame_sensorValue[2] > Flame_sensorValue[3] + 50 &&
+    Flame_sensorValue[2] > Flame_sensorValue[0] + 100 &&
+    Flame_sensorValue[2] > Flame_sensorValue[4] + 100
+  );
+}
+
+// ================== Motor Control ==================
+void motor1run(int motorSpeed) {
+  motorSpeed = constrain(motorSpeed, -255, 255);
+  if (motorSpeed > 0) {
+    digitalWrite(AIN1, 1); digitalWrite(AIN2, 0);
+    analogWrite(PWMA, motorSpeed);
+  } else if (motorSpeed < 0) {
+    digitalWrite(AIN1, 0); digitalWrite(AIN2, 1);
+    analogWrite(PWMA, abs(motorSpeed));
+  } else {
+    digitalWrite(AIN1, 1); digitalWrite(AIN2, 1);
+    analogWrite(PWMA, 0);
+  }
+}
+
+void motor2run(int motorSpeed) {
+  motorSpeed = constrain(motorSpeed, -255, 255);
+  if (motorSpeed > 0) {
+    digitalWrite(BIN1, 1); digitalWrite(BIN2, 0);
+    analogWrite(PWMB, motorSpeed);
+  } else if (motorSpeed < 0) {
+    digitalWrite(BIN1, 0); digitalWrite(BIN2, 1);
+    analogWrite(PWMB, abs(motorSpeed));
+  } else {
+    digitalWrite(BIN1, 1); digitalWrite(BIN2, 1);
+    analogWrite(PWMB, 0);
+  }
+}
+
+// ================== Movement Functions ==================
+void botForward(int speed) { motor1run(speed); motor2run(speed); }
+void botStop()             { motor1run(0);    motor2run(0);     }
+void botreverse()          { motor1run(-200);  motor2run(-200);   }
+void botRightTurn()        { motor1run(200);   motor2run(-200);   }
+void botLeftTurn()         { motor1run(-200);  motor2run(200);}
