@@ -8,7 +8,7 @@
 
 
 //======================================================
-// MOTOR DRIVER PINS - SAME AS ORIGINAL
+// MOTOR DRIVER PINS
 //======================================================
 
 #define AIN1 2
@@ -22,7 +22,7 @@
 
 
 //======================================================
-// BUTTON AND LED PINS - SAME AS ORIGINAL
+// BUTTON AND LED PINS
 //======================================================
 
 #define CALIB_BUTTON 13
@@ -46,7 +46,6 @@ int sensorWeight[8] =
    8,  4,  2,  1,
   -1, -2, -4, -8
 };
-
 
 int minValues[8];
 int maxValues[8];
@@ -73,13 +72,14 @@ int previousError = 0;
 // MOTOR SPEED
 //======================================================
 
+// MAXIMUM OVERALL SPEED
+int lfSpeed = 255;
+int currentSpeed = 255;
+
 int lsp;
 int rsp;
 
 int activeSensors;
-
-int lfSpeed = 180;
-int currentSpeed = 150;
 
 
 //======================================================
@@ -102,7 +102,7 @@ int lastDirection = 0;
 
 
 //======================================================
-// PID VALUES
+// PID VALUES - HIGH SPEED
 //======================================================
 
 float Kp = 0.10;
@@ -114,18 +114,18 @@ float Ki = 0;
 // TURN SETTINGS
 //======================================================
 
-const int GENTLE_ERROR = 100;
-const int MEDIUM_ERROR = 250;
-const int SHARP_ERROR = 450;
-const int VERY_SHARP_ERROR = 650;
+const int GENTLE_ERROR = 150;
+const int MEDIUM_ERROR = 300;
+const int SHARP_ERROR = 500;
+const int VERY_SHARP_ERROR = 700;
 
 
 //======================================================
 // RECOVERY SETTINGS
 //======================================================
 
-const int RECOVERY_SPEED = 145;
-const int RECOVERY_REVERSE = 55;
+const int RECOVERY_SPEED = 180;
+const int RECOVERY_REVERSE = 70;
 
 const unsigned long RECOVERY_TIMEOUT = 450;
 
@@ -227,7 +227,8 @@ void loop()
 
   onoff = 1;
 
-  currentSpeed = 150;
+  // MAXIMUM START SPEED
+  currentSpeed = 255;
 
   previousError = 0;
 
@@ -438,7 +439,7 @@ void readLine()
 
 
 //======================================================
-// LINE FOLLOWING
+// LINE FOLLOWING - HIGH SPEED
 //======================================================
 
 void lineFollow()
@@ -527,7 +528,7 @@ void lineFollow()
 
 
   //====================================================
-  // ADAPTIVE SPEED
+  // HIGH SPEED ADAPTIVE SPEED
   //====================================================
 
   int absError = abs(error);
@@ -535,52 +536,29 @@ void lineFollow()
   int baseSpeed;
 
 
-  // Straight
-
-  if (absError < GENTLE_ERROR)
-  {
-    baseSpeed = 180;
-  }
-
-
-  // Gentle curve
-
-  else if (absError < MEDIUM_ERROR)
-  {
-    baseSpeed = 170;
-  }
-
-
-  // Medium curve
-
-  else if (absError < SHARP_ERROR)
-  {
-    baseSpeed = 155;
-  }
-
-
-  // Sharp curve
-
-  else if (absError < VERY_SHARP_ERROR)
-  {
-    baseSpeed = 135;
-  }
-
-
-  // Very sharp turn
-
-  else
-  {
-    baseSpeed = 115;
-  }
-
-
-  // Don't jump above current acceleration speed
-
-  if (baseSpeed > currentSpeed)
-  {
-    baseSpeed = currentSpeed;
-  }
+  //====================================================
+  // STRAIGHT
+  //====================================================
+if (absError < GENTLE_ERROR)
+{
+    baseSpeed = 255;
+}
+else if (absError < MEDIUM_ERROR)
+{
+    baseSpeed = 250;
+}
+else if (absError < SHARP_ERROR)
+{
+    baseSpeed = 240;
+}
+else if (absError < VERY_SHARP_ERROR)
+{
+    baseSpeed = 225;
+}
+else
+{
+    baseSpeed = 210;
+}
 
 
   //====================================================
@@ -595,53 +573,35 @@ void lineFollow()
 
 
   //====================================================
-  // EXTRA LEFT / RIGHT TURN CONTROL
+  // HIGH SPEED SHARP TURN CONTROL
   //====================================================
 
   if (absError >= VERY_SHARP_ERROR)
-  {
-
+{
     if (error > 0)
     {
-
-      // RIGHT TURN
-
-      lsp = 35;
-      rsp = 150;
+        lsp = 70;
+        rsp = 175;
     }
-
     else
     {
-
-      // LEFT TURN
-
-      lsp = 150;
-      rsp = 35;
+        lsp = 175;
+        rsp = 70;
     }
-  }
-
-
-  else if (absError >= SHARP_ERROR)
-  {
-
+}
+else if (absError >= SHARP_ERROR)
+{
     if (error > 0)
     {
-
-      // RIGHT
-
-      lsp = 60;
-      rsp = 155;
+        lsp = 85;
+        rsp = 195;
     }
-
     else
     {
-
-      // LEFT
-
-      lsp = 155;
-      rsp = 60;
+        lsp = 195;
+        rsp = 85;
     }
-  }
+}
 
 
   //====================================================
@@ -661,24 +621,11 @@ void lineFollow()
 
 
 //======================================================
-// LINE RECOVERY
+// LINE RECOVERY - HIGH SPEED
 //======================================================
 
 void recoverLine()
 {
-
-  /*
-     IMPORTANT:
-
-     Original code used:
-
-     if (error < 1000)
-
-     That condition is true for almost every value.
-
-     Here we use lastDirection.
-  */
-
 
   unsigned long startTime =
     millis();
@@ -717,9 +664,9 @@ void recoverLine()
 
       // Unknown direction
 
-      motor1run(100);
+      motor1run(130);
 
-      motor2run(100);
+      motor2run(130);
     }
 
 
