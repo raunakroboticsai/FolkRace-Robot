@@ -1,11 +1,16 @@
 #ifndef cbi
 #define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
 #endif
+
 #ifndef sbi
 #define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 #endif
 
-//---------- Motor Driver Pins (TB6612FNG) -------------
+
+//======================================================
+// MOTOR DRIVER PINS - SAME AS ORIGINAL
+//======================================================
+
 #define AIN1 2
 #define AIN2 4
 #define PWMA 5
@@ -15,202 +20,810 @@
 #define BIN2 8
 #define STBY 9
 
-//---------- Button and LED Pins -----------------------
-#define CALIB_BUTTON 13//3   // SW1: Start Calibration
-#define RUN_BUTTON   9//11//10  // SW2: Start/Stop Run
 
-#define LED1 11          // Calibrating Indicator
-#define LED2 12          // Ready to Run Indicator
-#define LED3 13          // On Line Indicator
+//======================================================
+// BUTTON AND LED PINS - SAME AS ORIGINAL
+//======================================================
 
-//---------- Global Variables --------------------------
-bool isBlackLine = 1; // 1: Black line on white surface
+#define CALIB_BUTTON 13
+#define RUN_BUTTON   9
+
+#define LED1 11
+#define LED2 12
+#define LED3 13
+
+
+//======================================================
+// SENSOR SETTINGS
+//======================================================
+
+bool isBlackLine = 1;
+
 int numSensors = 8;
-int sensorWeight[8] = { 8, 4, 2, 1, -1, -2, -4, -8 };
 
-int minValues[8], maxValues[8], threshold[8];
-int sensorValue[8], sensorArray[8];
+int sensorWeight[8] =
+{
+   8,  4,  2,  1,
+  -1, -2, -4, -8
+};
 
-int P, D, I, PIDvalue;
-int error, previousError;
-int lsp, rsp;
+
+int minValues[8];
+int maxValues[8];
+int threshold[8];
+
+int sensorValue[8];
+int sensorArray[8];
+
+
+//======================================================
+// PID
+//======================================================
+
+int P;
+int D;
+int I;
+int PIDvalue;
+
+int error = 0;
+int previousError = 0;
+
+
+//======================================================
+// MOTOR SPEED
+//======================================================
+
+int lsp;
+int rsp;
+
 int activeSensors;
 
-float Kp = 0.10;//0.95;//1.1;//0.10;
-float Kd = 10.0;//12.0;//18.0;//10.0;
-float Ki = 0;//0.00020;//0;
-
 int lfSpeed = 180;
-int currentSpeed = 160;
+int currentSpeed = 150;
+
+
+//======================================================
+// RUN STATE
+//======================================================
+
 bool onoff = 0;
 bool onLine = 1;
 
-void setup() {
-  sbi(ADCSRA, ADPS2); cbi(ADCSRA, ADPS1); cbi(ADCSRA, ADPS0); // Set ADC speed
+
+//======================================================
+// LINE MEMORY
+//======================================================
+
+// -1 = line was on LEFT
+//  1 = line was on RIGHT
+//  0 = center
+
+int lastDirection = 0;
+
+
+//======================================================
+// PID VALUES
+//======================================================
+
+float Kp = 0.10;
+float Kd = 10.0;
+float Ki = 0;
+
+
+//======================================================
+// TURN SETTINGS
+//======================================================
+
+const int GENTLE_ERROR = 100;
+const int MEDIUM_ERROR = 250;
+const int SHARP_ERROR = 450;
+const int VERY_SHARP_ERROR = 650;
+
+
+//======================================================
+// RECOVERY SETTINGS
+//======================================================
+
+const int RECOVERY_SPEED = 145;
+const int RECOVERY_REVERSE = 55;
+
+const unsigned long RECOVERY_TIMEOUT = 450;
+
+
+//======================================================
+// SETUP
+//======================================================
+
+void setup()
+{
+
+  // Faster ADC
+
+  sbi(ADCSRA, ADPS2);
+  cbi(ADCSRA, ADPS1);
+  cbi(ADCSRA, ADPS0);
+
 
   Serial.begin(9600);
+
+
+  // Motor driver
 
   pinMode(AIN1, OUTPUT);
   pinMode(AIN2, OUTPUT);
   pinMode(PWMA, OUTPUT);
+
   pinMode(BIN1, OUTPUT);
   pinMode(BIN2, OUTPUT);
   pinMode(PWMB, OUTPUT);
+
   pinMode(STBY, OUTPUT);
+
   digitalWrite(STBY, HIGH);
 
+
+  // Buttons
+
   pinMode(CALIB_BUTTON, OUTPUT);
-  digitalWrite(CALIB_BUTTON,HIGH);
+  digitalWrite(CALIB_BUTTON, HIGH);
+
   pinMode(RUN_BUTTON, INPUT_PULLUP);
+
+
+  // LEDs
+
   pinMode(LED1, OUTPUT);
   pinMode(LED2, OUTPUT);
   pinMode(LED3, OUTPUT);
 }
 
-void loop() {
-  // --- Calibration Mode ---
+
+//======================================================
+// MAIN LOOP
+//======================================================
+
+void loop()
+{
+
+  //====================================================
+  // CALIBRATION
+  //====================================================
+
   digitalWrite(LED1, HIGH);
-  while (digitalRead(CALIB_BUTTON) == HIGH) {} // Wait for button
+
+
+  while (digitalRead(CALIB_BUTTON) == HIGH)
+  {
+    // Wait for calibration button
+  }
+
+
   digitalWrite(LED1, LOW);
+
   delay(1000);
+
   calibrate();
 
-  // --- Wait for RUN ---
+
+  //====================================================
+  // WAIT FOR RUN
+  //====================================================
+
   digitalWrite(LED2, HIGH);
-  while (digitalRead(RUN_BUTTON) == HIGH) {}
+
+
+  while (digitalRead(RUN_BUTTON) == HIGH)
+  {
+    // Wait for run button
+  }
+
+
   digitalWrite(LED2, LOW);
+
   delay(500);
+
+
+  // Reset controller
+
   onoff = 1;
 
-  while (1) {
-    // Toggle RUN/STOP with button
-    if (digitalRead(RUN_BUTTON) == LOW) {
+  currentSpeed = 150;
+
+  previousError = 0;
+
+  error = 0;
+
+  I = 0;
+
+  lastDirection = 0;
+
+
+  //====================================================
+  // RUN
+  //====================================================
+
+  while (1)
+  {
+
+    // Toggle RUN/STOP
+
+    if (digitalRead(RUN_BUTTON) == LOW)
+    {
       onoff = !onoff;
+
       delay(300);
     }
 
-    if (onoff) {
+
+    //==================================================
+    // ROBOT RUNNING
+    //==================================================
+
+    if (onoff)
+    {
+
       readLine();
-      if (onLine) {
+
+
+      //================================================
+      // LINE FOUND
+      //================================================
+
+      if (onLine)
+      {
+
         digitalWrite(LED3, HIGH);
+
+
         lineFollow();
-        if (currentSpeed < lfSpeed) currentSpeed++;
-      } else {
-        digitalWrite(LED3, LOW);
-        // Off-line recovery turns
-        if (error < 1000) {
-          motor1run(0);
-          motor2run(200);
-        } else if (error > -1000) {
-          motor1run(200);
-          motor2run(0);
+
+
+        // Smooth acceleration
+
+        if (currentSpeed < lfSpeed)
+        {
+          currentSpeed++;
         }
       }
-    } else {
+
+
+      //================================================
+      // LINE LOST
+      //================================================
+
+      else
+      {
+
+        digitalWrite(LED3, LOW);
+
+        recoverLine();
+      }
+    }
+
+
+    //==================================================
+    // ROBOT STOPPED
+    //==================================================
+
+    else
+    {
+
       digitalWrite(LED3, LOW);
+
       motor1run(0);
       motor2run(0);
     }
   }
 }
 
-void calibrate() {
-  for (int i = 0; i < 8; i++) {
+
+//======================================================
+// CALIBRATION
+//======================================================
+
+void calibrate()
+{
+
+  for (int i = 0; i < 8; i++)
+  {
+
     minValues[i] = analogRead(i);
+
     maxValues[i] = analogRead(i);
   }
 
-  for (int i = 0; i < 10000; i++) {
+
+  // Rotate robot during calibration
+
+  for (int i = 0; i < 10000; i++)
+  {
+
     motor1run(70);
     motor2run(-70);
-    for (int j = 0; j < 8; j++) {
+
+
+    for (int j = 0; j < 8; j++)
+    {
+
       int val = analogRead(j);
-      if (val < minValues[j]) minValues[j] = val;
-      if (val > maxValues[j]) maxValues[j] = val;
+
+
+      if (val < minValues[j])
+      {
+        minValues[j] = val;
+      }
+
+
+      if (val > maxValues[j])
+      {
+        maxValues[j] = val;
+      }
     }
   }
 
-  for (int i = 0; i < 8; i++) {
-    threshold[i] = (minValues[i] + maxValues[i]) / 2;
+
+  // Calculate thresholds
+
+  for (int i = 0; i < 8; i++)
+  {
+
+    threshold[i] =
+      (minValues[i] + maxValues[i]) / 2;
   }
+
 
   motor1run(0);
   motor2run(0);
 }
 
-void readLine() {
+
+//======================================================
+// READ LINE
+//======================================================
+
+void readLine()
+{
+
   onLine = 0;
-  for (int i = 0; i < 8; i++) {
+
+  activeSensors = 0;
+
+
+  for (int i = 0; i < 8; i++)
+  {
+
     if (isBlackLine)
-      sensorValue[i] = map(analogRead(i), minValues[i], maxValues[i], 0, 1000);
+    {
+
+      sensorValue[i] =
+        map(
+          analogRead(i),
+          minValues[i],
+          maxValues[i],
+          0,
+          1000
+        );
+    }
+
     else
-      sensorValue[i] = map(analogRead(i), minValues[i], maxValues[i], 1000, 0);
+    {
 
-    sensorValue[i] = constrain(sensorValue[i], 0, 1000);
-    sensorArray[i] = sensorValue[i] > 500;
+      sensorValue[i] =
+        map(
+          analogRead(i),
+          minValues[i],
+          maxValues[i],
+          1000,
+          0
+        );
+    }
 
-    if (sensorArray[i]) onLine = 1;
+
+    sensorValue[i] =
+      constrain(sensorValue[i], 0, 1000);
+
+
+    sensorArray[i] =
+      sensorValue[i] > 500;
+
+
+    if (sensorArray[i])
+    {
+      onLine = 1;
+
+      activeSensors++;
+    }
   }
 }
 
-void lineFollow() {
+
+//======================================================
+// LINE FOLLOWING
+//======================================================
+
+void lineFollow()
+{
+
   error = 0;
+
   activeSensors = 0;
 
-  for (int i = 0; i < 8; i++) {
-    error += sensorWeight[i] * sensorArray[i] * sensorValue[i];
-    activeSensors += sensorArray[i];
+
+  //====================================================
+  // CALCULATE POSITION ERROR
+  //====================================================
+
+  for (int i = 0; i < 8; i++)
+  {
+
+    error +=
+      sensorWeight[i] *
+      sensorArray[i] *
+      sensorValue[i];
+
+
+    activeSensors +=
+      sensorArray[i];
   }
 
+
   if (activeSensors != 0)
-    error = error / activeSensors;
+  {
+
+    error =
+      error / activeSensors;
+  }
+
+
+  //====================================================
+  // SAVE LAST DIRECTION
+  //====================================================
+
+  if (error > 40)
+  {
+    lastDirection = 1;
+  }
+
+  else if (error < -40)
+  {
+    lastDirection = -1;
+  }
+
+
+  //====================================================
+  // PID
+  //====================================================
 
   P = error;
-  I += error;
-  D = error - previousError;
-  PIDvalue = (Kp * P) + (Ki * I) + (Kd * D);
+
+
+  // No integral buildup on sharp turns
+
+  if (abs(error) < 250)
+  {
+
+    I += error;
+
+    I = constrain(I, -2500, 2500);
+  }
+
+  else
+  {
+    I = 0;
+  }
+
+
+  D =
+    error - previousError;
+
+
+  PIDvalue =
+    (Kp * P) +
+    (Ki * I) +
+    (Kd * D);
+
+
   previousError = error;
 
-  lsp = currentSpeed - PIDvalue;
-  rsp = currentSpeed + PIDvalue;
 
-  lsp = constrain(lsp, 0, 255);
-  rsp = constrain(rsp, 0, 255);
+  //====================================================
+  // ADAPTIVE SPEED
+  //====================================================
+
+  int absError = abs(error);
+
+  int baseSpeed;
+
+
+  // Straight
+
+  if (absError < GENTLE_ERROR)
+  {
+    baseSpeed = 180;
+  }
+
+
+  // Gentle curve
+
+  else if (absError < MEDIUM_ERROR)
+  {
+    baseSpeed = 170;
+  }
+
+
+  // Medium curve
+
+  else if (absError < SHARP_ERROR)
+  {
+    baseSpeed = 155;
+  }
+
+
+  // Sharp curve
+
+  else if (absError < VERY_SHARP_ERROR)
+  {
+    baseSpeed = 135;
+  }
+
+
+  // Very sharp turn
+
+  else
+  {
+    baseSpeed = 115;
+  }
+
+
+  // Don't jump above current acceleration speed
+
+  if (baseSpeed > currentSpeed)
+  {
+    baseSpeed = currentSpeed;
+  }
+
+
+  //====================================================
+  // NORMAL PID MOTOR OUTPUT
+  //====================================================
+
+  lsp =
+    baseSpeed - PIDvalue;
+
+  rsp =
+    baseSpeed + PIDvalue;
+
+
+  //====================================================
+  // EXTRA LEFT / RIGHT TURN CONTROL
+  //====================================================
+
+  if (absError >= VERY_SHARP_ERROR)
+  {
+
+    if (error > 0)
+    {
+
+      // RIGHT TURN
+
+      lsp = 35;
+      rsp = 150;
+    }
+
+    else
+    {
+
+      // LEFT TURN
+
+      lsp = 150;
+      rsp = 35;
+    }
+  }
+
+
+  else if (absError >= SHARP_ERROR)
+  {
+
+    if (error > 0)
+    {
+
+      // RIGHT
+
+      lsp = 60;
+      rsp = 155;
+    }
+
+    else
+    {
+
+      // LEFT
+
+      lsp = 155;
+      rsp = 60;
+    }
+  }
+
+
+  //====================================================
+  // LIMIT OUTPUT
+  //====================================================
+
+  lsp =
+    constrain(lsp, 0, 255);
+
+  rsp =
+    constrain(rsp, 0, 255);
+
 
   motor1run(rsp);
   motor2run(lsp);
 }
 
-void motor1run(int speed) {
-  speed = constrain(speed, -255, 255);
-  if (speed > 0) {
+
+//======================================================
+// LINE RECOVERY
+//======================================================
+
+void recoverLine()
+{
+
+  /*
+     IMPORTANT:
+
+     Original code used:
+
+     if (error < 1000)
+
+     That condition is true for almost every value.
+
+     Here we use lastDirection.
+  */
+
+
+  unsigned long startTime =
+    millis();
+
+
+  //====================================================
+  // SEARCH FOR LINE
+  //====================================================
+
+  while ((millis() - startTime) <
+         RECOVERY_TIMEOUT)
+  {
+
+    if (lastDirection > 0)
+    {
+
+      // Last line position = RIGHT
+
+      motor1run(RECOVERY_SPEED);
+
+      motor2run(-RECOVERY_REVERSE);
+    }
+
+    else if (lastDirection < 0)
+    {
+
+      // Last line position = LEFT
+
+      motor1run(-RECOVERY_REVERSE);
+
+      motor2run(RECOVERY_SPEED);
+    }
+
+    else
+    {
+
+      // Unknown direction
+
+      motor1run(100);
+
+      motor2run(100);
+    }
+
+
+    // Check sensors again
+
+    readLine();
+
+
+    if (onLine)
+    {
+
+      previousError = error;
+
+      return;
+    }
+  }
+
+
+  //====================================================
+  // IF STILL LOST
+  //====================================================
+
+  motor1run(0);
+  motor2run(0);
+}
+
+
+//======================================================
+// MOTOR 1
+//======================================================
+
+void motor1run(int speed)
+{
+
+  speed =
+    constrain(speed, -255, 255);
+
+
+  if (speed > 0)
+  {
+
     digitalWrite(AIN1, HIGH);
     digitalWrite(AIN2, LOW);
-  } else if (speed < 0) {
+  }
+
+  else if (speed < 0)
+  {
+
     digitalWrite(AIN1, LOW);
     digitalWrite(AIN2, HIGH);
+
     speed = -speed;
-  } else {
+  }
+
+  else
+  {
+
     digitalWrite(AIN1, HIGH);
     digitalWrite(AIN2, HIGH);
+
     speed = 0;
   }
+
+
   analogWrite(PWMA, speed);
 }
 
-void motor2run(int speed) {
-  speed = constrain(speed, -255, 255);
-  if (speed > 0) {
+
+//======================================================
+// MOTOR 2
+//======================================================
+
+void motor2run(int speed)
+{
+
+  speed =
+    constrain(speed, -255, 255);
+
+
+  if (speed > 0)
+  {
+
     digitalWrite(BIN1, HIGH);
     digitalWrite(BIN2, LOW);
-  } else if (speed < 0) {
+  }
+
+  else if (speed < 0)
+  {
+
     digitalWrite(BIN1, LOW);
     digitalWrite(BIN2, HIGH);
+
     speed = -speed;
-  } else {
+  }
+
+  else
+  {
+
     digitalWrite(BIN1, HIGH);
     digitalWrite(BIN2, HIGH);
+
     speed = 0;
   }
+
+
   analogWrite(PWMB, speed);
 }
